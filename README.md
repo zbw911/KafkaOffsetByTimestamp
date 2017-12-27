@@ -10,3 +10,8 @@
 
 ##由于是 spring boot 项目，可以用命令行启动了。
 >  java -cp kafkademo-0.0.1-SNAPSHOT.jar -D"loader.main=com.zhangbaowei.kafkaoffsetbytimestamp.KafkaConsumerExample"  -D"loader.args=1514364105000" org.springframework.boot.loader.PropertiesLauncher
+
+
+
+#还没有搞明白的问题：
+ 当 seek() 以后，马上 poll 却没有数据。需要进行重试以后才会有数据，一直没搞明白原因。 
