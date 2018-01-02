@@ -8,7 +8,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
-import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 /***
@@ -16,7 +15,7 @@ import java.util.stream.StreamSupport;
  *
  */
 public class OffsetFinder {
-    private static final Logger logger = LoggerFactory.getLogger(KafkaConsumerExample.class);
+    private static final Logger logger = LoggerFactory.getLogger(OffsetFinder.class);
     private KafkaConsumer<String, String> consumer;
 
     private long timestamp;
@@ -39,10 +38,20 @@ public class OffsetFinder {
         consumer.poll(0);
         Set<TopicPartition> assignments = consumer.assignment();
 
-        consumer.pause(assignments);
-//        consumer.paused().forEach(x -> System.out.println(x.toString()));
+        int retrycount = 0;
+        while (assignments.size() == 0 && retrycount++ < 10) {
 
-        logger.info("----------------------------------------------------------------------");
+            consumer.poll(100);
+            assignments = consumer.assignment();
+            logger.debug("assignments Try " + retrycount);
+        }
+
+        if (assignments.size() == 0)
+            throw new RuntimeException("assignments is 0!");
+
+        consumer.pause(assignments);
+
+        logger.debug("----------------------------------------------------------------------");
 
         for (TopicPartition topicPartition : assignments) {
 
@@ -75,9 +84,9 @@ public class OffsetFinder {
                     continue;
                 }
             } catch (Exception e) {
-
+                logger.debug("*****************************************************************************");
+                logger.error("ERRPOR IN " + topicPartition, e);
                 e.printStackTrace();
-                logger.error("error", e);
             } finally {
                 consumer.pause(Arrays.asList(topicPartition));
             }
@@ -98,7 +107,7 @@ public class OffsetFinder {
     private OffsetTimeStamp FindMiddle(OffsetTimeStamp begin, OffsetTimeStamp end) {
 
 
-        logger.info("middle " + begin + "-" + end);
+        logger.debug("middle " + begin + "-" + end);
 
         if (begin.getOffset() > end.getOffset()) {
             throw new RuntimeException("end > begin");
@@ -107,46 +116,49 @@ public class OffsetFinder {
         long offset = (begin.getOffset() + end.getOffset()) / 2L;
         consumer.seek(begin.getTopicPartition(), offset);
 
-        ConsumerRecords<String, String> records = RetryGetConsumerRecords(begin.getTopicPartition());
+        ConsumerRecords<String, String> records = OffsetUtils.RetryGetConsumerRecords(consumer, begin.getTopicPartition());
 
         if (records.count() == 0) {
             throw new RuntimeException(begin.getTopicPartition() + " FindMiddle Record is 0!");
         }
 
-        Optional<ConsumerRecord<String, String>> first = StreamSupport.stream(records.spliterator(), false).filter(x -> x.timestamp() >= timestamp).sorted(Comparator.comparingLong(ConsumerRecord::timestamp)).findFirst();
 
         Optional<ConsumerRecord<String, String>> max = StreamSupport.stream(records.spliterator(), false).max(Comparator.comparingLong(ConsumerRecord::timestamp));
         Optional<ConsumerRecord<String, String>> min = StreamSupport.stream(records.spliterator(), false).min(Comparator.comparingLong(ConsumerRecord::timestamp));
 
+        if (min.isPresent() && max.isPresent()
+                && (min.get().offset() == max.get().offset())
+                && (min.get().offset() + 1 == end.getOffset())) {
+            //只有一个元素 poll出来,被逼近到左右一个元素的情况下
+            logger.debug("records = 1 ，[NOTICE IT]");
+            //records.forEach(x -> System.out.println(x));
 
-        if (first.isPresent()) {
-            logger.info("asc begin");
-            Stream<ConsumerRecord<String, String>> sorted = StreamSupport.stream(records.spliterator(), false).filter(x -> x.timestamp() >= timestamp).sorted(Comparator.comparingLong(ConsumerRecord::timestamp)).limit(10);
+            return new OffsetTimeStamp(begin.getTopicPartition(), min.get().offset(), min.get().timestamp(), true);
+        }
 
-            sorted.forEach(x -> logger.info(formatConsumerRecord(x)));
+        System.out.println("max=\t" + max.get().timestamp() + "\r\nmin=\t" + min.get().timestamp() + "\r\ntaget=\t" + timestamp);
 
-            logger.info("asc end");
-            logger.info("desc start");
-            Stream<ConsumerRecord<String, String>> sorted2 = StreamSupport.stream(records.spliterator(), false).filter(x -> x.timestamp() < timestamp).sorted((x, y) -> Long.compare(y.timestamp(), x.timestamp())).limit(10);
+        //在中间这个范围
+        if (max.isPresent() && min.isPresent() && min.get().timestamp() <= timestamp && max.get().timestamp() >= timestamp) {
 
-            sorted2.forEach(x -> logger.info(formatConsumerRecord(x)));
-            logger.info("desc end");
+            Optional<ConsumerRecord<String, String>> first = StreamSupport.stream(records.spliterator(), false)
+                    .filter(x -> x.timestamp() >= timestamp)
+                    .sorted(Comparator.comparingLong(ConsumerRecord::timestamp))
+                    .findFirst();
+
+//            StreamSupport.stream(records.spliterator(), false).forEach(x -> {
+//                System.out.println((x.timestamp() - timestamp) + "==" + formatConsumerRecord(x));
+//            });
             return getHitOffsetTimeStamp(begin.getTopicPartition(), first);
         }
 
-        if (max.isPresent() && max.get().timestamp() <= timestamp) {
+        if (max.isPresent() && max.get().timestamp() < timestamp) {
             return FindMiddle(new OffsetTimeStamp(begin.getTopicPartition(), max.get().offset(), max.get().timestamp()), end);
         }
 
-        if (min.isPresent() && min.get().timestamp() >= timestamp) {
+        if (min.isPresent() && min.get().timestamp() > timestamp) {
             return FindMiddle(begin, new OffsetTimeStamp(begin.getTopicPartition(), min.get().offset(), min.get().timestamp()));
         }
-
-        // return null;
-        //返回默认
-//        begin.setTimestamp(-3);
-//        begin.setHit(true);
-//        return begin;
 
         throw new RuntimeException("Not Fount ");
     }
@@ -159,7 +171,7 @@ public class OffsetFinder {
 
 
         consumer.seekToBeginning(Arrays.asList(topicPartition));
-        ConsumerRecords<String, String> records = RetryGetConsumerRecords(topicPartition);
+        ConsumerRecords<String, String> records = OffsetUtils.RetryGetConsumerRecords(consumer, topicPartition);
 
         if (records.count() == 0) {
             throw new RuntimeException(topicPartition + " SeekRangeInitBegin Record is 0!");
@@ -187,25 +199,6 @@ public class OffsetFinder {
 
     }
 
-    private ConsumerRecords<String, String> RetryGetConsumerRecords(TopicPartition topicPartition) {
-        ConsumerRecords<String, String> records = null;
-        //对于多次的调用
-        for (int i = 0; i < 10; i++) {
-            records = consumer.poll(100);
-
-            int count = records.count();
-
-            if (count == 0) {
-
-                logger.info(topicPartition.toString() + " currentPosin = " + consumer.position(topicPartition) + " is NULL => TRY " + i);
-                continue;
-            } else {
-                break;
-            }
-        }
-        return records;
-    }
-
 
     private OffsetTimeStamp SeekRangeInitEnd(TopicPartition topicPartition) {
 
@@ -215,7 +208,7 @@ public class OffsetFinder {
 
         consumer.seek(topicPartition, position - 1);
 
-        ConsumerRecords<String, String> records = RetryGetConsumerRecords(topicPartition);
+        ConsumerRecords<String, String> records = OffsetUtils.RetryGetConsumerRecords(consumer, topicPartition);
 
         if (records.count() == 0) {
             throw new RuntimeException(topicPartition + " SeekRangeInitEnd Record is 0!");
